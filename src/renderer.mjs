@@ -9,6 +9,7 @@ import {stageClearText} from './stage-clear-presentation.mjs';
 import {readCoreDrawSchedule,orderPresentation} from './draw-scheduler.mjs';
 import {localizedHex,localizedFontFamily} from './localization/loader.mjs';
 import {capturePresentationOwners,interpolatePresentation,readCorePresentationMotion} from './presentation-interpolation.mjs';
+import {VertexBatch} from './vertex-batch.mjs';
 export function readCoreHud(core){const size=core._th12_hud_size?.()??20;if(!Number.isInteger(size)||size<20||size>256)throw Error('状态记录长度无效');const h=new Float32Array(core.HEAPU8.buffer,core._th12_hud(),size);if(typeof core._th12_score_stored!=='function')return h;const score=core._th12_score_stored();if(!Number.isInteger(score)||score< -0x80000000||score>0x7fffffff)throw Error('整数分数记录无效');const exact=[...h];exact[3]=score*10;if(size>40)exact[40]=score*10;return exact;}
 export function readCoreBossHud(core){
   if(!core._th12_boss_hud||!core._th12_boss_hud_size)return null;
@@ -153,7 +154,7 @@ export function nativeQuadCorners(x,y,w,h,angle=0,anchorX=0,anchorY=0,mode=0,off
 }
 export class Renderer {
   constructor(canvas,atlases,{fetcher=(...args)=>globalThis.fetch(...args)}={}){
-    this.fetch=fetcher;this.canvas=canvas;this.atlases=atlases;this.textures=new Map();this.dialogueTextures=new Map();this.batch=[];this.current=null;this.blend=0;this.animations=new AnimationSampler(atlases);this.stageBackgrounds=new Map();this.stageJobs=new Map();this.requestedStage=1;
+    this.fetch=fetcher;this.canvas=canvas;this.atlases=atlases;this.textures=new Map();this.dialogueTextures=new Map();this.batch=new VertexBatch();this.current=null;this.blend=0;this.animations=new AnimationSampler(atlases);this.stageBackgrounds=new Map();this.stageJobs=new Map();this.requestedStage=1;
     const gl=this.gl=canvas.getContext('webgl2',{alpha:false,antialias:false});if(!gl)throw Error('浏览器需要支持 WebGL 2');
     const compile=(type,source)=>{const s=gl.createShader(type);gl.shaderSource(s,source);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw Error(gl.getShaderInfoLog(s));return s;};
     const p=gl.createProgram();gl.attachShader(p,compile(gl.VERTEX_SHADER,`#version 300 es
@@ -199,8 +200,8 @@ export class Renderer {
     this.flush();const prefixes=names.map(name=>name+':');
     for(const [key,texture]of this.textures)if(prefixes.some(prefix=>key.startsWith(prefix))){if(this.current===texture)this.current=null;this.gl.deleteTexture(texture.texture);this.textures.delete(key);}
   }
-  begin(clearColor=[.035,.035,.055,1]){const g=this.gl;g.viewport(0,0,640,480);g.clearColor(...clearColor);g.clear(g.COLOR_BUFFER_BIT);g.bindVertexArray(this.vao);g.bindBuffer(g.ARRAY_BUFFER,this.buffer);this.drawCount=0;this.uploadCount=0;this.current=null;this.batch=[];this.batchMode=g.TRIANGLES;this.blend=-1;this.stageSurfaceCopied=false;this.stageSurfaceComposited=false;this.stageSurfaceAvailable=false;this.surfaceCopyError=0;this.material(0);}
-  flush(){if(!this.batch.length)return;const g=this.gl;g.bindTexture(g.TEXTURE_2D,this.current.texture);g.bufferData(g.ARRAY_BUFFER,new Float32Array(this.batch),g.STREAM_DRAW);g.drawArrays(this.batchMode,0,this.batch.length/10);this.drawCount++;this.uploadCount++;this.batch.length=0;}
+  begin(clearColor=[.035,.035,.055,1]){const g=this.gl;g.viewport(0,0,640,480);g.clearColor(...clearColor);g.clear(g.COLOR_BUFFER_BIT);g.bindVertexArray(this.vao);g.bindBuffer(g.ARRAY_BUFFER,this.buffer);this.drawCount=0;this.uploadCount=0;this.current=null;this.batch.length=0;this.batchMode=g.TRIANGLES;this.blend=-1;this.stageSurfaceCopied=false;this.stageSurfaceComposited=false;this.stageSurfaceAvailable=false;this.surfaceCopyError=0;this.material(0);}
+  flush(){if(!this.batch.length)return;const g=this.gl;g.bindTexture(g.TEXTURE_2D,this.current.texture);g.bufferData(g.ARRAY_BUFFER,this.batch.data,g.STREAM_DRAW,0,this.batch.length);g.drawArrays(this.batchMode,0,this.batch.length/10);this.drawCount++;this.uploadCount++;this.batch.length=0;}
   primitive(mode){if(this.batchMode!==mode){this.flush();this.batchMode=mode;}}
   material(blend){if(this.blend===blend)return;this.flush();const g=this.gl;const factors=[[g.SRC_ALPHA,g.ONE_MINUS_SRC_ALPHA],[g.SRC_ALPHA,g.ONE],[g.ZERO,g.ONE_MINUS_SRC_COLOR],[g.ONE,g.ZERO],[g.ONE_MINUS_DST_COLOR,g.ONE_MINUS_SRC_ALPHA],[g.DST_COLOR,g.ZERO],[g.ONE_MINUS_SRC_COLOR,g.ONE_MINUS_SRC_ALPHA]];g.blendFunc(...(factors[blend]||factors[0]));this.blend=blend;}
   region(name,entry,sx,sy,sw,sh,x,y,w,h,angle=0,alpha=1,tint=[1,1,1],blend=0,options={}){
@@ -214,7 +215,15 @@ export class Renderer {
     const offset=options.presentationOffset??[0,0];
     for(const i of [0,1,2,0,2,3])this.batch.push(corners[i][0]+offset[0],corners[i][1]+offset[1],uv[i][0],texture.flipY?1-uv[i][1]:uv[i][1],...tint,alpha,1,0);
   }
-  texture(texture,point=false,addressFlags=null){const g=this.gl,wrapU=addressFlags===null?(texture.defaultWrap??g.CLAMP_TO_EDGE):addressFlags&1?g.REPEAT:g.CLAMP_TO_EDGE,wrapV=addressFlags===null?(texture.defaultWrap??g.CLAMP_TO_EDGE):addressFlags&2?g.REPEAT:g.CLAMP_TO_EDGE;if(this.current!==texture||this.point!==point||this.wrapU!==wrapU||this.wrapV!==wrapV){this.flush();this.current=texture;this.point=point;this.wrapU=wrapU;this.wrapV=wrapV;g.bindTexture(g.TEXTURE_2D,texture.texture);g.texParameteri(g.TEXTURE_2D,g.TEXTURE_MIN_FILTER,point?g.NEAREST:g.LINEAR);g.texParameteri(g.TEXTURE_2D,g.TEXTURE_MAG_FILTER,point?g.NEAREST:g.LINEAR);g.texParameteri(g.TEXTURE_2D,g.TEXTURE_WRAP_S,wrapU);g.texParameteri(g.TEXTURE_2D,g.TEXTURE_WRAP_T,wrapV);}}
+  texture(texture,point=false,addressFlags=null){const g=this.gl,wrapU=addressFlags===null?(texture.defaultWrap??g.CLAMP_TO_EDGE):addressFlags&1?g.REPEAT:g.CLAMP_TO_EDGE,wrapV=addressFlags===null?(texture.defaultWrap??g.CLAMP_TO_EDGE):addressFlags&2?g.REPEAT:g.CLAMP_TO_EDGE;if(this.current!==texture||this.point!==point||this.wrapU!==wrapU||this.wrapV!==wrapV){this.flush();this.current=texture;this.point=point;this.wrapU=wrapU;this.wrapV=wrapV;g.bindTexture(g.TEXTURE_2D,texture.texture);this.textureParameters(texture,point,wrapU,wrapV);}}
+  textureParameters(texture,point,wrapU,wrapV){
+    const states=this.textureStates??=new WeakMap(),state=states.get(texture),g=this.gl;
+    if(!state||state.point!==point){g.texParameteri(g.TEXTURE_2D,g.TEXTURE_MIN_FILTER,point?g.NEAREST:g.LINEAR);g.texParameteri(g.TEXTURE_2D,g.TEXTURE_MAG_FILTER,point?g.NEAREST:g.LINEAR);}
+    if(!state||state.wrapU!==wrapU)g.texParameteri(g.TEXTURE_2D,g.TEXTURE_WRAP_S,wrapU);
+    if(!state||state.wrapV!==wrapV)g.texParameteri(g.TEXTURE_2D,g.TEXTURE_WRAP_T,wrapV);
+    if(state){state.point=point;state.wrapU=wrapU;state.wrapV=wrapV;}
+    else states.set(texture,{point,wrapU,wrapV});
+  }
   mesh(p){
     const texture=p.untextured?this.solid:this.textures.get(p.a.name+':'+p.a.entry);if(!texture||texture.available===false)return;
     this.material(p.a.blend);this.texture(texture,p.untextured||p.filter===1,p.addressFlags);
@@ -243,8 +252,7 @@ export class Renderer {
       this.current=null;this.point=null;this.stageSurfaceCopied=true;
       this.stageSurfaceAvailable=texture.available;
       if(!texture.available)return; //Retain the already rendered background.
-      g.texParameteri(g.TEXTURE_2D,g.TEXTURE_MIN_FILTER,g.LINEAR);g.texParameteri(g.TEXTURE_2D,g.TEXTURE_MAG_FILTER,g.LINEAR);
-      g.texParameteri(g.TEXTURE_2D,g.TEXTURE_WRAP_S,g.REPEAT);g.texParameteri(g.TEXTURE_2D,g.TEXTURE_WRAP_T,g.REPEAT);
+      this.textureParameters(texture,false,g.REPEAT,g.REPEAT);
       //Native42f200 clears the destination target before any layer5/prio13
       //draw. Keeping the previous background here would leave ghost strips
       //at the exposed edges when Main81 moves during Camera shake.
@@ -264,7 +272,7 @@ export class Renderer {
   sprite(name,id,x,y,angle=0,scale=1,alpha=1){const s=this.atlases[name]?.sprites[id];if(s)this.region(name,s.entry,s.x,s.y,s.w,s.h,x,y,s.w*scale,s.h*scale,angle,alpha);}
   solidTriangles(vertices,indices,blend){this.material(blend);this.texture(this.solid,true);this.primitive(this.gl.TRIANGLES);for(const i of indices){const p=vertices[i];this.batch.push(p.x,p.y,.5,.5,...p.color,1,0);}}
   solidLineStrip(vertices,blend){this.material(blend);this.texture(this.solid,true);this.primitive(this.gl.LINE_STRIP);this.flush();for(const p of vertices)this.batch.push(p.x,p.y,.5,.5,...p.color,1,0);this.flush();}
-  trail(x,y,angle,length,start,end,alpha){const dx=Math.cos(angle)*length/2,dy=Math.sin(angle)*length/2;this.material(0);this.texture(this.solid,true);this.primitive(this.gl.LINES);this.batch.push(x-dx,y-dy,.5,.5,...argbRgba(start,alpha),1,0,x+dx,y+dy,.5,.5,...argbRgba(end,alpha),1,0);}
+  trail(x,y,angle,length,start,end,alpha){const dx=Math.cos(angle)*length/2,dy=Math.sin(angle)*length/2;this.material(0);this.texture(this.solid,true);this.primitive(this.gl.LINES);this.batch.push(x-dx,y-dy,.5,.5,...argbRgba(start,alpha),1,0);this.batch.push(x+dx,y+dy,.5,.5,...argbRgba(end,alpha),1,0);}
   beamTrail(x,y,angle,length,width,start,end){
     // Native profile3/script210 uses sprite405, blend1/layer12. The custom
     // vertex update 46a0ee..46a153 offsets both edges by12px (full width24).
